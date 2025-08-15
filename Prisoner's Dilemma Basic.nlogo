@@ -1,62 +1,408 @@
-globals [partner-is-silent? result-message]
+extensions [ py ]
+
+globals [
+  partner-is-silent?
+  total-games-played
+  player-score
+  partner-score
+  game-history
+  llm-enabled?
+]
+
+breed [prisoners prisoner]
+
+prisoners-own [
+  prisoner-id
+  decision-history
+  current-decision  ; "cooperate" or "defect"
+  trust-level
+  llm-reasoning
+  action-cooperate
+  action-defect
+  action-status-ok
+  action-status-code
+  sense-partner-history
+  sense-game-number
+  sense-current-score
+  sense-trust-level
+]
 
 to setup
   clear-all
-  ;;Build the jail cell
+  set llm-enabled? true
+  set total-games-played 0
+  set player-score 0
+  set partner-score 0
+  set game-history []
+  
   ask patches with [ count neighbors != 8 ] [
-    set pcolor gray]
+    set pcolor gray
+  ]
 
-  ;;make the face visible
-  create-turtles 1 [set color gray set size 30 set shape "face"]
-  ;; set up the prisoner's dilemma
+  create-prisoners 2 [
+    set prisoner-id who
+    set color gray 
+    set size 20 
+    set shape "face"
+    set decision-history []
+    set current-decision "unknown"
+    set trust-level 50
+    set llm-reasoning ""
+    ifelse who = 0 [
+      setxy -8 0
+    ] [
+      setxy 8 0
+    ]
+  ]
+  
+  setup-llm-integration
+  reset-ticks
+end
+
+to setup-llm-integration
+  py:setup py:python
+  py:run "import math"
+  py:run "import sys"
+  py:run "import json"
+  py:run "import os"
+  py:run "from openai import OpenAI"
+  py:run "client = OpenAI(api_key='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')"
+  py:run "elements_list = []"
+  py:run "print('OpenAI client initialized successfully')"
+  (py:run
+    "def test_api_connection():"
+    "    try:"
+    "        response = client.chat.completions.create("
+    "            model='gpt-3.5-turbo',"
+    "            messages=[{'role': 'user', 'content': 'Say hello'}],"
+    "            max_tokens=10"
+    "        )"
+    "        print('API test successful')"
+    "        return True"
+    "    except Exception as e:"
+    "        print(f'API test failed: {e}')"
+    "        return False"
+  )
+  (py:run
+    "def parse_response(response):"
+    "    text = response"
+    "    text = text.lower()"
+    "    text = text.strip()"
+    "    text = text.replace(chr(39), chr(34))"
+    "    parse_ok = 'True'"
+    "    error_code = 'None'"
+    "    try:"
+    "        index = text.find('{')"
+    "        text = text[index:]"
+    "        index = text.find('}')"
+    "        text = text[:index + 1]"
+    "        print ('pre-processed-text: *****', text, '*****')"
+    "        text = json.loads(text)"
+    "        decision = text.get('decision', 'cooperate')"
+    "        reasoning = text.get('reasoning', 'No reasoning provided')"
+    "        trust_adjustment = text.get('trust-adjustment', 0)"
+    "        elements_list.append(parse_ok)"
+    "        elements_list.append(error_code)"
+    "        elements_list.append(decision.lower())"
+    "        elements_list.append(reasoning)"
+    "        elements_list.append(str(trust_adjustment))"
+    "        print('Parsed ok: ', elements_list)"
+    "    except json.JSONDecodeError as e:"
+    "        error_code = str(e)"
+    "        parse_ok = 'False'"
+    "        elements_list.append(parse_ok)"
+    "        elements_list.append(error_code)"
+    "        elements_list.append('cooperate')"
+    "        elements_list.append('Error in parsing response')"
+    "        elements_list.append('0')"
+    "        print ('Error: ', error_code)"
+    "    except Exception as e:"
+    "        error_code = str(e)"
+    "        parse_ok = 'False'"
+    "        elements_list.append(parse_ok)"
+    "        elements_list.append(error_code)"
+    "        elements_list.append('cooperate')"
+    "        elements_list.append('Error in processing')"
+    "        elements_list.append('0')"
+    "        print ('Error: ', error_code)"
+    
+    "def create_prompt(game_number, partner_history, current_score, partner_score, trust_level):"
+    "    # Convert history list to string if it's a list"
+    "    if isinstance(partner_history, list):"
+    "        history_text = 'No previous games' if not partner_history else ', '.join(partner_history[-5:])"
+    "    else:"
+    "        history_text = 'No previous games' if not partner_history else str(partner_history)"
+    "    system_text = 'You are a rational agent in an iterated Prisoner\\'s Dilemma game. You must decide whether to COOPERATE or DEFECT in each round. Your goal is to maximize your total score over multiple rounds while considering the long-term implications of your actions. Cooperation means staying silent (both get 1 year if both cooperate). Defection means confessing (you get 0 years if partner cooperates and you defect, but 3 years if both defect, and 5 years if you cooperate and partner defects). Consider your partner\\'s history, trust level, and strategic implications. Format your response as JSON: {\"decision\": \"cooperate\" or \"defect\", \"reasoning\": \"brief explanation\", \"trust-adjustment\": number between -10 and 10}. Keep response under 80 tokens.'"
+    "    prompt_text = f'Game {game_number}: Your current score: {current_score} years, Partner score: {partner_score} years. Partner\\'s recent decisions: {history_text}. Your current trust level toward partner: {trust_level}/100. What is your decision?'"
+    "    return prompt_text, system_text"
+    
+    "def make_llm_decision(prompt_text, system_text):"
+    "    try:"
+    "        print(f'Making LLM call with prompt: {prompt_text[:100]}...')"
+    "        response = client.chat.completions.create("
+    "            model='gpt-3.5-turbo',"
+    "            messages=["
+    "                {'role': 'system', 'content': system_text},"
+    "                {'role': 'user', 'content': prompt_text}"
+    "            ],"
+    "            max_tokens=80,"
+    "            temperature=0.7"
+    "        )"
+    "        result = response.choices[0].message.content"
+    "        print(f'LLM Response: {result}')"
+    "        return result"
+    "    except Exception as e:"
+    "        print(f'LLM Error: {e}')"
+    "        print(f'Error type: {type(e).__name__}')"
+    "        return '{\"decision\": \"cooperate\", \"reasoning\": \"Error occurred, defaulting to cooperation\", \"trust-adjustment\": 0}'"
+   )
+end
+
+to test-api-connection
+  py:run "test_result = test_api_connection()"
+  let result py:runresult "test_result"
+  ifelse result [
+    user-message "API connection successful! You can now use the LLM features."
+  ] [
+    user-message "API connection failed. Check the console for error details."
+  ]
+end
+
+to-report get_llm_data
+   let llm_data py:runresult "elements_list"
+   report llm_data
+end
+
+to-report populate_prisoner_with_llm_data [ llm_data ]
+  let parse_ok item 0 llm_data
+  let return_ok true
+  ifelse parse_ok = "True" [
+    print "Parser ok"
+    set current-decision item 2 llm_data
+    set llm-reasoning item 3 llm_data
+    let trust_adjustment read-from-string item 4 llm_data
+    set trust-level max list 0 (min list 100 (trust-level + trust_adjustment))
+    set action-status-ok true
+    set action-status-code "None"
+    print (word "Prisoner " prisoner-id " LLM Decision: " current-decision " - " llm-reasoning)
+  ] [
+    set action-status-ok false
+    set action-status-code item 1 llm_data
+    set current-decision "cooperate"
+    set llm-reasoning "Error in LLM processing, defaulting to cooperation"
+    print (word "Prisoner " prisoner-id " LLM Error: " action-status-code)
+    set return_ok false
+  ]
+  report return_ok
+end
+
+to sense-environment
+  set sense-game-number total-games-played + 1
+  set sense-current-score ifelse-value (prisoner-id = 0) [player-score] [partner-score]
+  
+  let partner-prisoner one-of other prisoners
+  set sense-partner-history []
+  ask partner-prisoner [
+    set sense-partner-history decision-history
+  ]
+  
+  set sense-trust-level trust-level
+end
+
+to get-llm-decision
+  ; Check if Python is initialized before making LLM calls
+  let python-ready? false
+  carefully [
+    py:run "test_var = 1"
+    set python-ready? true
+  ] [
+    print "Python not initialized. Please click Setup first."
+    set current-decision "cooperate"
+    stop
+  ]
+  
+  let partner-history-list []
+  if length sense-partner-history > 0 [
+    set partner-history-list sense-partner-history
+  ]
+  
+  py:run "elements_list = []"
+  
+  py:run "partner_history = []"
+  foreach partner-history-list [ decision ->
+    py:run (word "partner_history.append('" decision "')")
+  ]
+  
+  py:run (word "prompt_text, system_text = create_prompt(" 
+               sense-game-number ", partner_history, " 
+               sense-current-score ", " 
+               (ifelse-value (prisoner-id = 0) [partner-score] [player-score]) ", " 
+               sense-trust-level ")")
+  
+  py:run "response = make_llm_decision(prompt_text, system_text)"
+  py:run "parse_response(response)"
+  
+  let llm-data get_llm_data
+  let success populate_prisoner_with_llm_data llm-data
+  
+  if not success [
+    print "LLM decision failed, using default strategy"
+  ]
+end
+
+to play-round
+  if count prisoners = 0 [
+    user-message "Please click 'Setup' first to initialize the game!"
+    stop
+  ]
+  
+  set total-games-played total-games-played + 1
+  
+  ask prisoners [
+    sense-environment
+    ifelse llm-enabled? and prisoner-id = 0 [
+      get-llm-decision
+    ] [
+      ifelse partner-silence-known? [
+        set current-decision ifelse-value partner-silent? ["cooperate"] ["defect"]
+      ] [
+        ifelse length decision-history > 0 [
+          let partner-prisoner one-of other prisoners
+          let partner-last-decision ""
+          ask partner-prisoner [
+            ifelse length decision-history > 0 [
+              set partner-last-decision last decision-history
+            ] [
+              set partner-last-decision "cooperate"
+            ]
+          ]
+          set current-decision partner-last-decision
+        ] [
+          set current-decision "cooperate"
+        ]
+      ]
+    ]
+  ]
+  
+  let prisoner0-decision ""
+  let prisoner1-decision ""
+  
+  ask prisoner 0 [ set prisoner0-decision current-decision ]
+  ask prisoner 1 [ set prisoner1-decision current-decision ]
+  
+  let p0-score 0
+  let p1-score 0
+  
+  if prisoner0-decision = "cooperate" and prisoner1-decision = "cooperate" [
+    set p0-score 1
+    set p1-score 1
+  ]
+  if prisoner0-decision = "cooperate" and prisoner1-decision = "defect" [
+    set p0-score 5
+    set p1-score 0
+  ]
+  if prisoner0-decision = "defect" and prisoner1-decision = "cooperate" [
+    set p0-score 0
+    set p1-score 5
+  ]
+  if prisoner0-decision = "defect" and prisoner1-decision = "defect" [
+    set p0-score 3
+    set p1-score 3
+  ]
+  
+  set player-score player-score + p0-score
+  set partner-score partner-score + p1-score
+  
+  ask prisoners [
+    set decision-history lput current-decision decision-history
+    
+    let partner-prisoner one-of other prisoners
+    let partner-decision ""
+    ask partner-prisoner [ set partner-decision current-decision ]
+    
+    ifelse partner-decision = "cooperate" [
+      set trust-level min list 100 (trust-level + 2)
+    ] [
+      set trust-level max list 0 (trust-level - 5)
+    ]
+    
+    update-prisoner-appearance
+  ]
+  
+  set game-history lput (list prisoner0-decision prisoner1-decision p0-score p1-score) game-history
+  
+  show-round-results prisoner0-decision prisoner1-decision p0-score p1-score
+  
+  tick
+end
+
+to update-prisoner-appearance
+  ifelse current-decision = "cooperate" [
+    set shape "face silent"
+    set color green
+  ] [
+    set shape "face devious" 
+    set color red
+  ]
+end
+
+to show-round-results [ p0-decision p1-decision p0-score p1-score ]
+  let outcome-message ""
+  
+  if p0-decision = "cooperate" and p1-decision = "cooperate" [
+    set outcome-message "Both prisoners stayed silent. Each gets 1 year."
+  ]
+  if p0-decision = "cooperate" and p1-decision = "defect" [
+    set outcome-message "Prisoner 0 stayed silent, Prisoner 1 confessed. P0: 5 years, P1: 0 years."
+  ]
+  if p0-decision = "defect" and p1-decision = "cooperate" [
+    set outcome-message "Prisoner 0 confessed, Prisoner 1 stayed silent. P0: 0 years, P1: 5 years."
+  ]
+  if p0-decision = "defect" and p1-decision = "defect" [
+    set outcome-message "Both prisoners confessed. Each gets 3 years."
+  ]
+  
+  print (word "Round " total-games-played ": " outcome-message)
+  print (word "Total scores - Prisoner 0: " player-score " years, Prisoner 1: " partner-score " years")
+  
+  user-message (word "Round " total-games-played ": " outcome-message "\nTotal: P0=" player-score "yrs, P1=" partner-score "yrs")
+end
+
+to reset-game
+  setup
+end
+
+to answer
   ifelse partner-silence-known? [
     set partner-is-silent? partner-silent?
   ]
   [
-    ;;if partner silence is not known, choose randomly whether or not he is silent.
     ifelse random 2 = 0
     [ set partner-is-silent? true ]
     [ set partner-is-silent? false ]
   ]
-end
 
-;;play the game, changing the face depending on the outcome.
-to answer
-  setup  ;;clears variables away so that setup doesn't need to be pressed every time.
-
-  ;;next the four possible combinations of choices are dealt with.
-  ;;the result corresponds to the tables in the interface and Info tabs.
-  ;;first check to see if your partner was silent.
   ifelse partner-is-silent? [
-      ;;now go through your two possible choices
       ifelse you-silent? [
       ask turtles [set shape "face silent"]
-      set result-message "You and your partner both remain silent.  You are sentenced to one year imprisonment."
-      user-message result-message
+      user-message "You and your partner both remain silent.  You are sentenced to one year imprisonment."
     ] [
       ask turtles [set shape "face devious"]
-      set result-message "You confess and your partner remains silent. You go free."
-      user-message result-message
+      user-message "You confess and your partner remains silent. You go free."
     ]
   ]
-  ;;your partner confessed.
   [
-    ;;again go through your two possible choices
     ifelse you-silent? [
       ask turtles [set shape "face sucker" ]
-      set result-message "You remain silent, but your partner confesses.  You are sentenced to five years imprisonment."
-      user-message result-message
+      user-message "You remain silent, but your partner confesses.  You are sentenced to five years imprisonment."
     ] [
       ask turtles [set shape "face rational"]
-      set result-message "You and you partner both confess.  You are sentenced to three years imprisonment."
-      user-message result-message
+      user-message "You and you partner both confess.  You are sentenced to three years imprisonment."
     ]
   ]
 end
 
 
-; Copyright 2002 Uri Wilensky.
-; See Info tab for full copyright and license.
 @#$#@#$#@
 GRAPHICS-WINDOW
 313
@@ -86,11 +432,155 @@ ticks
 30.0
 
 BUTTON
+64
+80
+168
+113
+Setup
+setup
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+BUTTON
 169
 80
 269
 113
+Play Round
+play-round
 NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+BUTTON
+64
+113
+168
+146
+Reset Game
+reset-game
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+BUTTON
+169
+113
+269
+146
+Test API
+test-api-connection
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+SWITCH
+64
+146
+268
+179
+llm-enabled?
+llm-enabled?
+0
+1
+-1000
+
+SWITCH
+64
+179
+268
+212
+partner-silence-known?
+partner-silence-known?
+0
+1
+-1000
+
+SWITCH
+64
+212
+268
+245
+partner-silent?
+partner-silent?
+1
+1
+-1000
+
+MONITOR
+695
+80
+785
+125
+Games Played
+total-games-played
+17
+1
+11
+
+MONITOR
+695
+125
+785
+170
+Prisoner 0 Score
+player-score
+17
+1
+11
+
+MONITOR
+695
+170
+785
+215
+Prisoner 1 Score
+partner-score
+17
+1
+11
+
+TEXTBOX
+70
+250
+274
+280
+            ORIGINAL CONTROLS\n-------------------------
+11
+0.0
+0
+
+BUTTON
+169
+280
+269
+313
+Original Answer
 answer
 NIL
 1
@@ -104,100 +594,41 @@ NIL
 
 SWITCH
 64
-179
+313
 268
-212
-partner-silent?
-partner-silent?
-1
-1
--1000
-
-BUTTON
-64
-80
-168
-113
-NIL
-setup
-NIL
-1
-T
-OBSERVER
-NIL
-NIL
-NIL
-NIL
-1
-
-SWITCH
-64
-113
-268
-146
+346
 you-silent?
 you-silent?
 0
 1
 -1000
-
-SWITCH
-64
-146
-268
-179
-partner-silence-known?
-partner-silence-known?
-0
-1
--1000
-
-TEXTBOX
-119
-317
-300
-377
-                 TRUE      FALSE\nTRUE      1 year    5 years\nFALSE      none     3 years
-11
-0.0
-0
 
 TEXTBOX
 70
-247
-274
-277
-            YOUR JAIL TIME\n-------------------------
+360
+300
+440
+LLM Enhanced Prisoner's Dilemma\n\nPrisoner 0 (left) uses LLM reasoning\nPrisoner 1 (right) uses simple strategy\n\nGreen = Cooperate (Silent)\nRed = Defect (Confess)\n\nClick 'Test API' before starting!
 11
 0.0
 0
 
 TEXTBOX
-176
-285
-298
-303
-partner-silent?
-11
-0.0
-0
-
-TEXTBOX
-21
-339
-111
-357
-you-silent?
-11
-0.0
-0
-
-TEXTBOX
+695
+30
+845
+78
+Game Statistics
 14
-24
-308
-80
-Decide whether to remain silent or confess and\nthen answer the police to receive your sentence.
+0.0
+1
+
+TEXTBOX
+64
+30
+274
+78
+Play multiple rounds with LLM-enhanced decision making
 11
 0.0
 0
@@ -205,11 +636,23 @@ Decide whether to remain silent or confess and\nthen answer the police to receiv
 @#$#@#$#@
 ## WHAT IS IT?
 
-You and your partner have been arrested for robbing a bank and find yourselves in the classic prisoner's dilemma.  The police place each of you into separate rooms and come to you with the following proposal...
+This is an enhanced version of the classic Prisoner's Dilemma that integrates Large Language Model (LLM) reasoning for strategic decision-making, following the patterns from the AntGPT Colony models.
 
-"We know you two did this, but don't have proof for anything but a minor charge of firearm possession that will give you a year of jail time.  Confess to the robbery and we will make sure the judge goes easy on you, 3 years.  If your partner confesses and you don't, we're going to throw the book at you and give you 5 years of prison time.  If your partner doesn't and you do, we will let you go free."
+You and your partner have been arrested for robbing a bank and find yourselves in the classic prisoner's dilemma. The police place each of you into separate rooms and come to you with the following proposal...
 
-Should you remain silent or should you confess? How much jail time you will receive depends on your answer and also on your partner's answer to the same question. The following table summarizes the results of the four different situations:
+"We know you two did this, but don't have proof for anything but a minor charge of firearm possession that will give you a year of jail time. Confess to the robbery and we will make sure the judge goes easy on you, 3 years. If your partner confesses and you don't, we're going to throw the book at you and give you 5 years of prison time. If your partner doesn't and you do, we will let you go free."
+
+### LLM Enhancement
+
+Prisoner 0 (left) uses GPT-3.5-turbo to make decisions based on:
+- Game history and partner's previous decisions
+- Current trust level toward the partner
+- Strategic reasoning about long-term implications
+- JSON-formatted responses with decision and reasoning
+
+Prisoner 1 (right) uses a simple tit-for-tat strategy or user-controlled decisions.
+
+### Payoff Matrix
 
 ```text
  Your Action | Partner's Action | Your Jail Time | Partner's Jail Time
@@ -222,69 +665,94 @@ Should you remain silent or should you confess? How much jail time you will rece
 
 ## HOW TO USE IT
 
-SETUP: Place yourself in the prisoner's dilemma
+**SETUP**: Initialize the game with two prisoners and LLM integration. **IMPORTANT: Add your OpenAI API key in the setup-llm-integration procedure before running!**
 
-ANSWER: Answer the police and receive your sentence.
+**PLAY ROUND**: Execute one round of the prisoner's dilemma with LLM decision-making
 
-YOU-SILENT?: If you are silent, you will not confess.  If you are not silent, you will confess.
+**RESET GAME**: Clear all game history and start fresh
 
-PARTNER-SILENCE-KNOWN?: When on, this switch allows you to control the actions of your partner with the PARTNER-SILENT? switch.
+**LLM-ENABLED?**: Enable/disable LLM reasoning for Prisoner 0
 
-PARTNER-SILENT?: If your partner is silent, he will not confess.  If he is not silent, he will confess.
+**PARTNER-SILENCE-KNOWN?**: When on, allows controlling Prisoner 1's actions manually
+
+**PARTNER-SILENT?**: Controls Prisoner 1's decision when partner-silence-known? is on
+
+## LLM INTEGRATION
+
+The model uses the Python extension to integrate with OpenAI's GPT-3.5-turbo model. The LLM receives context about:
+- Current game number
+- Partner's recent decision history
+- Current scores for both prisoners
+- Trust level toward partner
+
+The LLM responds with JSON containing:
+- Decision: "cooperate" or "defect"
+- Reasoning: Strategic explanation
+- Trust adjustment: How much to adjust trust level (-10 to +10)
+
+## SETUP REQUIREMENTS
+
+1. **NetLogo 6.4.0** or higher with Python extension
+2. **Python** with openai package: `pip install openai`
+3. **OpenAI API Key**: Replace 'Insert your API key here' in the setup-llm-integration procedure
+
+## VISUAL FEEDBACK
+
+- **Green prisoners**: Cooperating (staying silent)
+- **Red prisoners**: Defecting (confessing)
+- **Position**: Prisoner 0 (LLM) on left, Prisoner 1 (simple strategy) on right
 
 ## THINGS TO TRY
 
-Turn off PARTNER-SILENCE-KNOWN?.  Attempt to minimize your prison sentence.  Can you do better than your partner?  Why or why not?
-
-What strategy is best for the group as a whole?
-
-Describe a real life scenario that is similar to the prisoner's dilemma, preferably one from your own life.  What was the best decision?  Why?
+1. Run multiple rounds with LLM enabled and observe decision patterns
+2. Compare LLM performance against different opponent strategies
+3. Turn off LLM and compare pure strategy performance
+4. Observe how trust levels evolve over time
+5. Try different manual strategies using the partner controls
 
 ## EXTENDING THE MODEL
 
-Examine the PD TWO PERSON ITERATED model.
+- Implement different opponent strategies
+- Add more sophisticated trust dynamics
+- Log complete game sessions for analysis
+- Experiment with different LLM prompts
+- Add multiple LLM agents competing
+
+## TECHNICAL DETAILS
+
+This model follows the same LLM integration pattern as the AntGPT Colony model:
+- Python extension for LLM communication
+- JSON parsing with error handling
+- Structured prompt generation
+- Robust fallback mechanisms
 
 ## NETLOGO FEATURES
 
-The use of the USER-MESSAGE primitive to give the prison sentence.
-
-The use the SIZE turtle variable and TURTLE SIZES option on the view to make large faces.
-
-The use of the SHAPE turtle variable to change the faces.
+- Python extension for LLM integration
+- Breed-based modeling (prisoners)
+- Dynamic visual feedback
+- Real-time monitoring
+- Error handling and logging
 
 ## RELATED MODELS
 
-PD Two Person Iterated
-
-PD N-Person Iterated
-
-PD Basic Evolutionary
+- AntGPT Colony (LLM integration pattern)
+- PD Two Person Iterated
+- PD N-Person Iterated
+- PD Basic Evolutionary
 
 ## HOW TO CITE
 
-If you mention this model or the NetLogo software in a publication, we ask that you include the citations below.
+If you mention this model in a publication, please cite:
 
-For the model itself:
-
-* Wilensky, U. (2002).  NetLogo Prisoner's Dilemma Basic model.  http://ccl.northwestern.edu/netlogo/models/Prisoner'sDilemmaBasic.  Center for Connected Learning and Computer-Based Modeling, Northwestern University, Evanston, IL.
-
-Please cite the NetLogo software as:
-
-* Wilensky, U. (1999). NetLogo. http://ccl.northwestern.edu/netlogo/. Center for Connected Learning and Computer-Based Modeling, Northwestern University, Evanston, IL.
+* Enhanced Prisoner's Dilemma with LLM Integration (2025), based on AntGPT patterns
+* Original: Wilensky, U. (2002). NetLogo Prisoner's Dilemma Basic model. http://ccl.northwestern.edu/netlogo/models/Prisoner'sDilemmaBasic
 
 ## COPYRIGHT AND LICENSE
 
-Copyright 2002 Uri Wilensky.
-
-![CC BY-NC-SA 3.0](http://ccl.northwestern.edu/images/creativecommons/byncsa.png)
-
-This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 3.0 License.  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-sa/3.0/ or send a letter to Creative Commons, 559 Nathan Abbott Way, Stanford, California 94305, USA.
-
-Commercial licenses are also available. To inquire about commercial licenses, please contact Uri Wilensky at uri@northwestern.edu.
-
-This model was created as part of the projects: PARTICIPATORY SIMULATIONS: NETWORK-BASED DESIGN FOR SYSTEMS LEARNING IN CLASSROOMS and/or INTEGRATED SIMULATION AND MODELING ENVIRONMENT. The project gratefully acknowledges the support of the National Science Foundation (REPP & ROLE programs) -- grant numbers REC #9814682 and REC-0126227.
-
-<!-- 2002 -->
+Based on the original Prisoner's Dilemma Basic model by Uri Wilensky (2002)
+Enhanced with LLM integration following AntGPT patterns
+Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 3.0 License
 @#$#@#$#@
 default
 true
